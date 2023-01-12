@@ -10,6 +10,16 @@
 #define DEFAULT_PORT "10000"
 #define DEFAULT_BUFLEN 512
 
+#include <bitset>
+
+void add_parity(std::string &message)
+{
+    // calculate parity bit
+    std::bitset<8> data(message);
+    bool parity = data.count() % 2;
+    message += parity ? '1' : '0';
+}
+
 uint32_t CalculateCRC(const std::string &message)
 {
     uint32_t crc = 0xFFFFFFFF;
@@ -50,6 +60,9 @@ void SendMessages(SOCKET socket)
         std::getline(std::cin, recipient);
         std::cout << "Enter message: ";
         std::getline(std::cin, message);
+
+        // Add parity to message
+        add_parity(message);
 
         std::string send_message = "MESG|" + recipient + "|" + message;
         send(socket, send_message.c_str(), send_message.length(), 0);
