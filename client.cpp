@@ -3,11 +3,39 @@
 #include <ws2tcpip.h>
 #include <string>
 #include <thread>
+#include <cstdint>
 
 #pragma comment(lib, "ws2_32.lib")
 
 #define DEFAULT_PORT "10000"
 #define DEFAULT_BUFLEN 512
+
+uint32_t CalculateCRC(const std::string &message)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (char c : message)
+    {
+        crc = crc ^ c;
+        for (int i = 0; i < 8; i++)
+        {
+            if (crc & 0x01)
+            {
+                crc = (crc >> 1) ^ 0x04C11DB7;
+            }
+            else
+            {
+                crc = crc >> 1;
+            }
+        }
+    }
+    return crc;
+}
+
+bool CheckCRC(const std::string &message, uint32_t received_crc)
+{
+    uint32_t calculated_crc = CalculateCRC(message);
+    return received_crc == calculated_crc;
+}
 
 void SendMessages(SOCKET socket)
 {
@@ -28,6 +56,19 @@ void SendMessages(SOCKET socket)
     }
 }
 
+void SendPrivateMessage()
+{
+    std::string recipient;
+    std::string message;
+    std::cout << "Enter recipient name: ";
+    std::getline(std::cin, recipient);
+    std::cout << "Enter message: ";
+    std::getline(std::cin, message);
+
+    std::string send_message = "MESG|" + recipient + "|" + message;
+    send(socket, send_message.c_str(), send_message.length(), 0);
+}
+
 void ReceiveMessages(SOCKET socket)
 {
     char recvbuf[DEFAULT_BUFLEN];
@@ -43,7 +84,17 @@ void ReceiveMessages(SOCKET socket)
         }
 
         std::string message(recvbuf, bytes_received);
-        std::cout << message << std::endl;
+
+        if (CheckCRC == true)
+        {
+            // message is valid
+            cout << message << endl;
+        }
+        else
+        {
+            // message is corrupted
+            cout << "Received corrupted message" << endl;
+        }
     }
 }
 
@@ -55,7 +106,6 @@ int main()
     std::getline(std::cin, name);
 
     std::string set_name_message = "NAME|" + name;
-    
 
     WSADATA wsa_data;
     int wsa_startup_result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
@@ -71,7 +121,7 @@ int main()
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
-    struct addrinfo* addrinfo_result = nullptr;
+    struct addrinfo *addrinfo_result = nullptr;
     int getaddrinfo_result = getaddrinfo("127.0.0.1", DEFAULT_PORT, &hints, &addrinfo_result);
     if (getaddrinfo_result != 0)
     {
@@ -100,7 +150,6 @@ int main()
         sock = INVALID_SOCKET;
     }
 
-
     freeaddrinfo(addrinfo_result);
     if (sock == INVALID_SOCKET)
     {
@@ -111,13 +160,14 @@ int main()
 
     std::thread receive_thread(ReceiveMessages, sock);
     std::thread send_thread(SendMessages, sock);
+    std::thread private_message_thread(SendPrivateMessage, sock);
 
     receive_thread.join();
     send_thread.join();
+    private_message_thread.join();
 
     closesocket(sock);
     WSACleanup();
-    
+
     return 0;
 }
-

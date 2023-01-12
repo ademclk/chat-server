@@ -5,6 +5,9 @@
 #include <unordered_map>
 #include <mutex>
 #include <sstream>
+#include <ctime>
+#include <fstream>
+#include "crc.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -20,7 +23,27 @@ struct ClientInfo
 std::unordered_map<std::string, ClientInfo> clients;
 std::mutex clients_mutex;
 
-std::string GenerateErrorCheckingBits(const std::string& message)
+void log_with_timestamp(std::string message)
+{
+
+    // get current time and date and apply formatting
+    time_t now = time(0);
+    tm *ltm = localtime(&now);
+    char timestamp[20];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", ltm);
+
+    // open log file
+    std::ofstream log_file;
+    log_file.open("log.txt", std::ios_base::app);
+
+    // write to log file
+    log_file << timestamp << " " << message << std::endl;
+
+    // close log file
+    log_file.close();
+}
+
+std::string GenerateErrorCheckingBits(const std::string &message)
 {
     // Calculate the checksum of the message
     unsigned long checksum = 0;
@@ -38,6 +61,22 @@ std::string GenerateErrorCheckingBits(const std::string& message)
     return checksum_str.substr(checksum_str.length() - 8);
 }
 
+void ForwardPrivateMessage(std::string message)
+{
+    size_t separator = message.find("|");
+    std::string recipient = message.substr(0, separator);
+    message = message.substr(separator + 1);
+
+    for (int i = 0; i < clients.size(); i++)
+    {
+        if (clients[i].name == recipient)
+        {
+            // send the private message to the intended recipient
+            send(clients[i].sock, message.c_str(), message.length(), 0);
+            break;
+        }
+    }
+}
 
 void ServiceClient(SOCKET client_socket, std::string client_name)
 {
@@ -70,27 +109,29 @@ void ServiceClient(SOCKET client_socket, std::string client_name)
         {
             // Add client to list
             std::lock_guard<std::mutex> guard(clients_mutex);
-            clients[client_name] = { client_socket, client_name };
+            clients[client_name] = {client_socket, client_name};
 
             // Send list of current clients to new client
             std::string client_list;
-            for (const auto& client_info : clients)
+            for (const auto &client_info : clients)
             {
-                const auto& name = client_info.first;
+                const auto &name = client_info.first;
                 client_list += name + '|';
             }
             send(client_socket, client_list.c_str(), client_list.length(), 0);
 
             // Send notification to all other clients about new client
-            for (const auto& client_info : clients)
+            for (const auto &client_info : clients)
             {
-                const auto& name = client_info.first;
-                const auto& info = client_info.second;
-                if (name == client_name) continue;
+                const auto &name = client_info.first;
+                const auto &info = client_info.second;
+                if (name == client_name)
+                    continue;
                 std::string notification = "NEW|" + client_name;
                 send(info.socket, notification.c_str(), notification.length(), 0);
             }
 
+            log_with_timestamp(client_name);
         }
         else if (command == "MESG")
         {
@@ -101,26 +142,56 @@ void ServiceClient(SOCKET client_socket, std::string client_name)
                 std::cerr << "Invalid MESG command received from client " << client_name << std::endl;
                 continue;
             }
-            std::string recipient_name = recipient.substr(0, separator_pos);
             std::string message_text = recipient.substr(separator_pos + 1);
 
-            std::lock_guard<std::mutex> guard(clients_mutex);
-            auto recipient_iter = clients.find(recipient_name);
-            if (recipient_iter == clients.end())
+            separator_index = message.find("|");
+            receiver = message.substr(0, separator_index);
+            message = message.substr(separator_index + 1);
+
+            // service_client() function
+            unsigned int crc = CalculateCRC(message);
+
+            // attach the CRC value to the message
+            string complete_message = message + "|" + to_string(crc);
+
+            // forward the message to the appropriate recipients
+            for (const auto &client : clients)
             {
-                std::cerr << "Recipient " << recipient_name << " not found for client " << client_name << std::endl;
-                continue;
+                if (client.name == receiver)
+                {
+                    send(client.sock, complete_message.c_str(), complete_message.length(), 0);
+                    break;
+                }
             }
-            // Send message to recipient
-            std::string send_message = "MESG|" + client_name + "|" + message_text;
-            send(recipient_iter->second.socket, send_message.c_str(), send_message.length(), 0);
 
-            // Send message to sender (echo)
-            send(client_socket, send_message.c_str(), send_message.length(), 0);
+            if (receiver != "")
+            {
+                std::lock_guard<std::mutex> guard(clients_mutex);
+                auto recipient_iter = clients.find(recipient_name);
+                if (recipient_iter == clients.end())
+                {
+                    std::cerr << "Recipient " << recipient_name << " not found for client " << client_name << std::endl;
+                    continue;
+                }
 
-            // Add error checking bits to message and send it
-            message_text = "MESG|" + message_text + "|" + GenerateErrorCheckingBits(message_text);
-            send(recipient_iter->second.socket, message_text.c_str(), message_text.length(), 0);
+                ForwardPrivateMessage(receiver + "|" + message);
+            }
+            else
+            {
+                // Send message to recipient
+                std::string send_message = "MESG|" + client_name + "|" + message_text;
+                send(recipient_iter->second.socket, send_message.c_str(), send_message.length(), 0);
+
+                log_with_timestamp(recipient);
+                log_with_timestamp(message_text);
+
+                // Send message to sender (echo)
+                send(client_socket, send_message.c_str(), send_message.length(), 0);
+
+                // Add error checking bits to message and send it
+                message_text = "MESG|" + message_text + "|" + GenerateErrorCheckingBits(message_text);
+                send(recipient_iter->second.socket, message_text.c_str(), message_text.length(), 0);
+            }
         }
 
         else if (command == "MERR")
@@ -146,6 +217,9 @@ void ServiceClient(SOCKET client_socket, std::string client_name)
 
             // Resend last message without errors
             message_text = "MESG|" + message_text;
+
+            log_with_timestamp(message_text);
+
             send(recipient_iter->second.socket, message_text.c_str(), message_text.length(), 0);
         }
         else if (command == "GONE")
@@ -153,10 +227,13 @@ void ServiceClient(SOCKET client_socket, std::string client_name)
             // Remove client from list and notify other clients
             std::lock_guard<std::mutex> guard(clients_mutex);
             clients.erase(client_name);
-            for (const auto& client_info : clients)
+
+            log_with_timestamp(client_name + " disconnected");
+
+            for (const auto &client_info : clients)
             {
-                const auto& name = client_info.first;
-                const auto& info = client_info.second;
+                const auto &name = client_info.first;
+                const auto &info = client_info.second;
                 std::string notification = "GONE|" + client_name;
                 send(info.socket, notification.c_str(), notification.length(), 0);
             }
@@ -167,7 +244,7 @@ void ServiceClient(SOCKET client_socket, std::string client_name)
             std::cerr << "Invalid command received from client " << client_name << std::endl;
         }
     }
-    }
+}
 
 int main()
 {
@@ -185,7 +262,7 @@ int main()
     hints.ai_protocol = IPPROTO_TCP;
     hints.ai_flags = AI_PASSIVE;
 
-    struct addrinfo* addrinfo_result = nullptr;
+    struct addrinfo *addrinfo_result = nullptr;
     int getaddrinfo_result = getaddrinfo(nullptr, DEFAULT_PORT, &hints, &addrinfo_result);
     if (getaddrinfo_result != 0)
     {
@@ -193,7 +270,6 @@ int main()
         WSACleanup();
         return 1;
     }
-
 
     SOCKET listen_socket = INVALID_SOCKET;
     listen_socket = socket(addrinfo_result->ai_family, addrinfo_result->ai_socktype, addrinfo_result->ai_protocol);
@@ -258,5 +334,3 @@ int main()
     WSACleanup();
     return 0;
 }
-
-
